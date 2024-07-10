@@ -8,6 +8,8 @@ module OmniAuth
   module Strategies
     class Facebook < OmniAuth::Strategies::OAuth2
       class NoAuthorizationCodeError < StandardError; end
+      class MissingScopesError < StandardError; end
+      class AppIdMismatchError < StandardError; end
 
       DEFAULT_SCOPE = 'email'
       DEFAULT_FACEBOOK_API_VERSION = 'v19.0'.freeze
@@ -68,9 +70,13 @@ module OmniAuth
       end
 
       def callback_phase
-        with_authorization_code! do
+        with_authorization_parameter! do
           super
         end
+      rescue AppIdMismatchError => e
+        fail!(:app_id_mismatch, e)
+      rescue MissingScopesError => e
+        fail!(:missing_scopes, e)
       rescue NoAuthorizationCodeError => e
         fail!(:no_authorization_code, e)
       rescue OmniAuth::Facebook::SignedRequest::UnknownSignatureAlgorithmError => e
@@ -112,12 +118,35 @@ module OmniAuth
       protected
 
       def build_access_token
+        return build_access_token_from_request(request.params['access_token']) if request.params['access_token']
+
         super.tap do |token|
           token.options.merge!(access_token_options)
         end
       end
 
       private
+
+      def build_access_token_from_request(access_token_param)
+        token_hash = { access_token: access_token_param }
+        access_token = ::OAuth2::AccessToken.from_hash(client, token_hash.update(access_token_options))
+        verify_access_token!(access_token)
+
+        access_token
+      end
+
+      def verify_access_token!(access_token)
+        opts = { params: { input_token: access_token.token, access_token: app_access_token } }
+        token_info = access_token.get('/debug_token', opts)
+        missing_scopes = authorize_params.scope.split(',').collect(&:strip) - token_info.parsed.fetch('data', {}).fetch('scopes', [])
+        raise MissingScopesError, "Missing scopes #{missing_scopes.join(', ')}" if missing_scopes.any?
+      rescue ::OAuth2::Error => e
+        raise AppIdMismatchError, "Failed to validate token: #{e.message}"
+      end
+
+      def app_access_token
+        "%s|%s" % [client.id, client.secret]
+      end
 
       def signed_request_from_cookie
         @signed_request_from_cookie ||= raw_signed_request_from_cookie && OmniAuth::Facebook::SignedRequest.parse(raw_signed_request_from_cookie, client.secret)
@@ -131,8 +160,8 @@ module OmniAuth
       #
       # 1. The request 'code' param (manual callback from standard server-side flow)
       # 2. A signed request from cookie (passed from the client during the client-side flow)
-      def with_authorization_code!
-        if request.params.key?('code')
+      def with_authorization_parameter!
+        if request.params.key?('code') || request.params.key?('access_token')
           yield
         elsif code_from_signed_request = signed_request_from_cookie && signed_request_from_cookie['code']
           request.params['code'] = code_from_signed_request

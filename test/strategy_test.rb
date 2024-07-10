@@ -459,7 +459,7 @@ module SignedRequestTests
     end
 
     test 'throws an error on calling build_access_token' do
-      assert_raises(OmniAuth::Strategies::Facebook::NoAuthorizationCodeError) { strategy.send(:with_authorization_code!) {} }
+      assert_raises(OmniAuth::Strategies::Facebook::NoAuthorizationCodeError) { strategy.send(:with_authorization_parameter!) {} }
     end
   end
 
@@ -545,5 +545,39 @@ module SignedRequestTests
       strategy.expects(:fail!).times(1).with(:unknown_signature_algorithm, kind_of(OmniAuth::Facebook::SignedRequest::UnknownSignatureAlgorithmError))
       strategy.callback_phase
     end
+  end
+end
+
+class BadTokenTest < StrategyTestCase
+  def setup
+    super
+    @access_token = stub('OAuth2::AccessToken')
+    @access_token.stubs(:token).returns('fake_token')
+    ::OAuth2::AccessToken.stubs(:from_hash).returns(@access_token)
+    @request.stubs(:params).returns({'access_token' => 'fake_token'})
+    strategy.stubs(:app_access_token).returns('other_token')
+  end
+
+  test 'throws error when access token bad' do
+    params = { params: { input_token: 'fake_token', access_token: 'other_token' } }
+    @access_token.expects(:get).with('/debug_token', params).raises(::OAuth2::Error.new(stub_everything('Faraday::Response')))
+    strategy.stubs(:access_token).returns(@access_token)
+    assert_raises(OmniAuth::Strategies::Facebook::AppIdMismatchError) { strategy.send(:build_access_token) {} }
+  end
+
+  test 'fails when good token with missing scope' do
+    params = { params: { input_token: 'fake_token', access_token: 'other_token' } }
+    missing_scopes_response = stub_everything('Faraday::Response')
+    missing_scopes_response.stubs(:parsed).returns({ 'data' => { 'scopes' => [] }})
+    @access_token.expects(:get).with('/debug_token', params).returns(missing_scopes_response)
+    assert_raises(OmniAuth::Strategies::Facebook::MissingScopesError) { strategy.send(:build_access_token) {} }
+  end
+
+  test 'succeeds when good token and scope' do
+    params = { params: { input_token: 'fake_token', access_token: 'other_token' } }
+    good_response = stub_everything('Faraday::Response')
+    good_response.stubs(:parsed).returns({ 'data' => { 'scopes' => %w(public_profile email) } })
+    @access_token.expects(:get).with('/debug_token', params).returns(good_response)
+    assert_equal 'fake_token', strategy.send(:build_access_token).token
   end
 end
